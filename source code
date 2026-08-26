@@ -1,0 +1,278 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESP32Servo.h>
+#include <string>
+
+
+WebServer server(80);
+
+
+#define trig 5
+#define echo 19
+#define saravevo 18
+#define buz 33
+#define leds 15
+#define sensorLed 4
+#define in1 26 // left
+#define in2 27 // left
+#define in11 14 // right 
+#define in22 12 // right
+#define en1 25 // left motor
+#define en2 13 // right motor   
+
+// Global State Variables
+char reading = 'S';
+int currentSpeed = 180;
+const float sound_speed = 0.034;
+unsigned long millis_delay = millis();
+int columns = 16;
+int rows = 2;
+int delayTime = 250;
+unsigned long pre_lcd = 0;
+
+long duration;
+float distance = 0;
+
+bool buzstate=0;
+unsigned long buztimer=0; 
+
+int servo_pos = 0;
+int servo_step = 3;  
+unsigned long previous_servo = 0;
+const int servo_interval = 20; 
+
+unsigned long previous_leds = 0;
+const unsigned long stop_delay = 150;
+
+
+Servo mator;
+
+// Dashboard UI
+const char HTML_PAGE[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>El Dawly Control</title>
+  <style>
+    :root { --primary: #00f2fe; --bg: #090d16; --card: #151c28; }
+    body { font-family: system-ui, sans-serif; background: var(--bg); color: #fff; margin: 0; padding: 15px; display: flex; justify-content: center; user-select: none; }
+    .dashboard { width: 100%; max-width: 400px; background: var(--card); border-radius: 24px; padding: 20px; text-align: center; }
+    .aux-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+    .aux-btn { padding: 14px; border-radius: 14px; border: 1px solid #2e3a4e; background: #1c2536; color: #94a3b8; font-size: 15px; font-weight: bold; cursor: pointer; }
+    .aux-btn.active { background: var(--primary); color: #000; }
+    .speed-box { background: #0f172a; padding: 16px; border-radius: 16px; margin: 20px 0; }
+    input[type=range] { width: 100%; accent-color: var(--primary); }
+    .dpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; width: 280px; margin: 0 auto; }
+    .btn { width: 100%; aspect-ratio: 1; border-radius: 18px; border: none; background: #1c2536; color: #fff; font-size: 26px; cursor: pointer; transition: background 0.1s, transform 0.1s; }
+    
+    /* Highlight style applied while holding direction buttons down */
+    .btn.active { background: var(--primary); color: #000; transform: scale(0.92); box-shadow: 0 0 15px var(--primary); }
+    
+    .btn-stop { background: #ef4444; }
+    .btn-stop:active { background: #dc2626; }
+    .empty { visibility: hidden; }
+  </style>
+</head>
+<body>
+  <div class="dashboard">
+    <h2>ELDAWLY_Car</h2>
+    <div class="aux-grid">
+      <button class="aux-btn" id="lightBtn" onclick="toggleSwitch('/light', this)">💡 Headlight</button>
+      <button class="aux-btn" id="hornBtn" onclick="toggleSwitch('/buzzer', this)">🔊 Horn</button>
+    </div>
+    <div class="speed-box">
+      <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+        <span>Throttle Power</span><span id="speedVal">70%</span>
+      </div>
+      <input type="range" min="0" max="255" value="180" oninput="updateSpeed(this.value)">
+    </div>
+    <div class="dpad">
+      <div class="empty"></div><button class="btn" id="btnF">▲</button><div class="empty"></div>
+      <button class="btn" id="btnL">◄</button><button class="btn btn-stop" onclick="sendCmd('S')">■</button><button class="btn" id="btnR">►</button>
+      <div class="empty"></div><button class="btn" id="btnB">▼</button><div class="empty"></div>
+    </div>
+  </div>
+  <script>
+    function sendCmd(dir) { fetch('/cmd?dir=' + dir); }
+    function updateSpeed(val) {
+      document.getElementById('speedVal').innerText = Math.round((val / 255) * 100) + '%';
+      fetch('/speed?val=' + val);
+    }
+    function toggleSwitch(endpoint, btn) {
+      btn.classList.toggle('active');
+      const state = btn.classList.contains('active') ? 'ON' : 'OFF';
+      fetch(endpoint + '?state=' + state);
+    }
+
+    function bindHoldBtn(id, dir) {
+      const btn = document.getElementById(id);
+
+      const start = (e) => { 
+        e.preventDefault(); 
+        btn.classList.add('active'); // Turn background blue on press
+        sendCmd(dir); 
+      };
+
+      const stop = (e) => { 
+        e.preventDefault(); 
+        btn.classList.remove('active'); // Revert background on release
+        sendCmd('S'); 
+      };
+
+      // Mobile Touch Events
+      btn.addEventListener('touchstart', start, { passive: false });
+      btn.addEventListener('touchend', stop, { passive: false });
+      btn.addEventListener('touchcancel', stop, { passive: false });
+
+      // Desktop Mouse Events
+      btn.addEventListener('mousedown', start);
+      btn.addEventListener('mouseup', stop);
+      btn.addEventListener('mouseleave', stop); // Reverts color if cursor drags out
+    }
+
+    bindHoldBtn('btnF', 'F'); 
+    bindHoldBtn('btnB', 'B');
+    bindHoldBtn('btnL', 'L'); 
+    bindHoldBtn('btnR', 'R');
+  </script>
+</body>
+</html>
+)rawliteral";
+
+void motorDirection(char dir) {
+  reading = dir;
+  int pwm = currentSpeed;
+  
+  if (dir == 'F') {
+    analogWrite(en1, pwm); analogWrite(en2, pwm);
+    digitalWrite(in1, LOW); digitalWrite(in2, HIGH);
+    digitalWrite(in11, HIGH); digitalWrite(in22, LOW);   
+  }
+  else if (dir == 'B') {
+    analogWrite(en1, pwm); analogWrite(en2, pwm);
+    digitalWrite(in1, HIGH); digitalWrite(in2, LOW);
+    digitalWrite(in11, LOW); digitalWrite(in22, HIGH);
+  }
+  else if (dir == 'R') { 
+    analogWrite(en1, pwm); analogWrite(en2, 0);
+    digitalWrite(in1, LOW); digitalWrite(in2, HIGH);
+    digitalWrite(in11, LOW); digitalWrite(in22, LOW);
+  }
+  else if (dir == 'L') { 
+    analogWrite(en1, 0); analogWrite(en2, pwm);
+    digitalWrite(in1, LOW); digitalWrite(in2, LOW);
+    digitalWrite(in11, HIGH); digitalWrite(in22, LOW);
+  }
+  else { // Stop ('S')
+    analogWrite(en1, 0); analogWrite(en2, 0);
+    digitalWrite(in1, LOW); digitalWrite(in2, LOW);
+    digitalWrite(in11, LOW); digitalWrite(in22, LOW);
+  }
+}
+
+void handleRoot() { server.send(200, "text/html", HTML_PAGE); }
+
+void handleCommand() {
+  if (server.hasArg("dir")) {
+    char dir = server.arg("dir")[0];
+    
+   
+    if ((dir == 'F' || dir == 'L' || dir == 'R') && distance > 0 && distance <= 7) {
+      motorDirection('S');
+    } else {
+      motorDirection(dir);
+    }
+  }
+  server.send(200, "text/plain", "OK");
+}
+
+void handleSpeed() {
+  if (server.hasArg("val")) {
+    currentSpeed = server.arg("val").toInt();
+    if (reading != 'S') motorDirection(reading); 
+  }
+  server.send(200, "text/plain", "OK");
+}
+
+void handleLight() {
+  if (server.hasArg("state")) {
+    digitalWrite(sensorLed, server.arg("state") == "ON" ? HIGH : LOW);
+  }
+  server.send(200, "text/plain", "OK");
+}
+
+void handleBuzzer() {
+  if (server.hasArg("state")) {
+    buzstate=server.arg("state") == "ON";
+    if (buzstate) tone(buz, 1000); else noTone(buz);
+  }
+  server.send(200, "text/plain", "OK");
+}
+
+void setup() {
+  pinMode(in1, OUTPUT); pinMode(in2, OUTPUT);
+  pinMode(in11, OUTPUT); pinMode(in22, OUTPUT);
+  pinMode(en1, OUTPUT); pinMode(en2, OUTPUT);
+  
+  pinMode(trig, OUTPUT); pinMode(echo, INPUT);
+  pinMode(buz, OUTPUT); pinMode(leds, OUTPUT);
+  pinMode(sensorLed,OUTPUT);
+  
+  mator.attach(saravevo);
+
+  WiFi.softAP("EL DAWLY_CAR", "12345678");
+
+  server.on("/", handleRoot);
+  server.on("/cmd", handleCommand);
+  server.on("/speed", handleSpeed);
+  server.on("/light", handleLight);
+  server.on("/buzzer", handleBuzzer);
+  
+  server.begin();
+  Serial.begin(9600);
+}
+
+void loop() {
+  millis_delay = millis();
+  server.handleClient();
+
+  // Ultrasonic Distance Measurement
+  digitalWrite(trig, LOW);
+  delayMicroseconds(2); 
+  digitalWrite(trig, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trig, LOW);
+
+ 
+  duration = pulseIn(echo, HIGH, 30000); 
+  distance = duration * sound_speed / 2;
+
+  // Servo Radar Sweep
+  if (millis_delay - previous_servo >= servo_interval) {
+    previous_servo = millis_delay; 
+    mator.write(servo_pos);
+    servo_pos += servo_step; 
+
+    if (servo_pos >= 135 || servo_pos <= 0) {
+      servo_step = -servo_step; 
+    }
+  }
+
+  // Active Emergency Stop
+  if (distance > 0 && distance <= 25) { 
+    if (reading == 'F' || reading == 'L' || reading == 'R') {
+      motorDirection('S'); 
+    }
+    tone(buz, 555);
+
+    if (millis_delay - previous_leds >= stop_delay) {
+      digitalWrite(leds, !digitalRead(leds)); 
+      previous_leds = millis_delay;
+    }
+  } else { 
+    digitalWrite(leds,LOW);
+    if (buzstate) tone(buz, 1000); else noTone(buz);
+  }
+}
